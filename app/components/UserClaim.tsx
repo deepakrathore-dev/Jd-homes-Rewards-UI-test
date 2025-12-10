@@ -3,13 +3,22 @@
 import { useState, useEffect } from "react";
 import {
   useAccount,
-  useWriteContract,
   useWaitForTransactionReceipt,
   useReadContract,
 } from "wagmi";
+import { writeContract } from "@wagmi/core";
 import { parseEther, formatEther, type Address } from "viem";
+import { config } from "@/app/config/WagmiConfig";
 import { CONTRACT_ADDRESS, CONTRACT_ABI } from "@/app/config/contract";
-import { getMerkleProof, type MerkleLeaf } from "@/app/utils/merkle";
+import {
+  generateMerkleTree,
+  getMerkleProof,
+  type MerkleLeaf,
+} from "@/app/utils/merkle";
+import {
+  getMerkleLeaves,
+  findLeafByAccount,
+} from "@/app/utils/merkleStorage";
 
 interface CampaignInfo {
   token: Address;
@@ -24,19 +33,13 @@ interface CampaignInfo {
 export default function UserClaim() {
   const { address, isConnected } = useAccount();
   const [campaignId, setCampaignId] = useState("");
-  const [index, setIndex] = useState("");
-  const [claimAmount, setClaimAmount] = useState("");
-  const [merkleRoot, setMerkleRoot] = useState("");
+  const [userLeaf, setUserLeaf] = useState<MerkleLeaf | null>(null);
   const [merkleProof, setMerkleProof] = useState<`0x${string}`[]>([]);
-  const [proofInput, setProofInput] = useState("");
   const [isClaimed, setIsClaimed] = useState<boolean | null>(null);
   const [campaignInfo, setCampaignInfo] = useState<CampaignInfo | null>(null);
-
-  const {
-    writeContract: claim,
-    data: claimHash,
-    isPending: isClaiming,
-  } = useWriteContract();
+  const [proofError, setProofError] = useState<string>("");
+  const [claimHash, setClaimHash] = useState<`0x${string}` | undefined>();
+  const [isClaiming, setIsClaiming] = useState(false);
 
   const { isLoading: isConfirming, isSuccess: isClaimSuccess } =
     useWaitForTransactionReceipt({
@@ -57,8 +60,11 @@ export default function UserClaim() {
     address: CONTRACT_ADDRESS,
     abi: CONTRACT_ABI,
     functionName: "isClaimed",
-    args: campaignId && index ? [BigInt(campaignId), BigInt(index)] : undefined,
-    query: { enabled: !!campaignId && !!index },
+    args:
+      campaignId && userLeaf
+        ? [BigInt(campaignId), BigInt(userLeaf.index)]
+        : undefined,
+    query: { enabled: !!campaignId && !!userLeaf },
   });
 
   useEffect(() => {
@@ -72,7 +78,6 @@ export default function UserClaim() {
         expiry: campaignData[5] as bigint,
         active: campaignData[6] as boolean,
       });
-      setMerkleRoot(campaignData[1] as string);
     }
   }, [campaignData]);
 
@@ -82,50 +87,65 @@ export default function UserClaim() {
     }
   }, [claimedStatus]);
 
-  const handleCheckClaimStatus = () => {
-    if (!campaignId || !index) {
-      alert("Please enter campaign ID and index");
+  // Auto-find user's leaf and generate proof when campaign ID changes
+  useEffect(() => {
+    if (!campaignId || !address || !isConnected) {
+      setUserLeaf(null);
+      setMerkleProof([]);
+      setProofError("");
+      return;
+    }
+
+    // Find user's leaf
+    const leaf = findLeafByAccount(Number(campaignId), address);
+    if (!leaf) {
+      setUserLeaf(null);
+      setMerkleProof([]);
+      setProofError("No reward found for your address in this campaign");
+      return;
+    }
+
+    setUserLeaf(leaf);
+    setProofError("");
+
+    // Get all leaves and generate proof
+    const allLeaves = getMerkleLeaves(Number(campaignId));
+    if (!allLeaves) {
+      setMerkleProof([]);
+      setProofError("Merkle tree data not found for this campaign");
+      return;
+    }
+
+    try {
+      const tree = generateMerkleTree(allLeaves);
+      const proof = getMerkleProof(tree, leaf);
+      setMerkleProof(proof);
+      setProofError("");
+    } catch (error) {
+      console.error("Error generating proof:", error);
+      setProofError("Failed to generate merkle proof");
+      setMerkleProof([]);
+    }
+  }, [campaignId, address, isConnected]);
+
+  // Refetch claim status when user leaf changes
+  useEffect(() => {
+    if (userLeaf && campaignId) {
+      refetchClaimed();
+    }
+  }, [userLeaf, campaignId]);
+
+  const handleCheckCampaign = () => {
+    if (!campaignId) {
+      alert("Please enter campaign ID");
       return;
     }
     refetchCampaign();
-    refetchClaimed();
-  };
-
-  const handleGenerateProof = () => {
-    if (!merkleRoot || !index || !address || !claimAmount) {
-      alert("Please fill all fields");
-      return;
-    }
-
-    // For demo purposes, we'll use the proof input field
-    // In production, you would generate this from the merkle tree
-    // This is a placeholder - users should provide the proof from backend/API
-    if (proofInput) {
-      try {
-        const proofArray = JSON.parse(proofInput) as string[];
-        setMerkleProof(proofArray as `0x${string}`[]);
-        alert("Proof loaded! You can now claim.");
-      } catch (e) {
-        alert(
-          "Invalid proof format. Please provide a JSON array of hex strings."
-        );
-      }
-    } else {
-      alert(
-        "Please provide merkle proof. In production, this would be generated from your backend."
-      );
-    }
   };
 
   const handleClaim = async () => {
-    if (
-      !campaignId ||
-      !index ||
-      !address ||
-      !claimAmount ||
-      merkleProof.length === 0
-    ) {
-      alert("Please fill all fields and generate proof");
+    if (!campaignId || !address || !userLeaf || merkleProof.length === 0) {
+      alert("Please enter campaign ID and ensure your reward is found");
       return;
     }
 
@@ -134,18 +154,32 @@ export default function UserClaim() {
       return;
     }
 
-    claim({
-      address: CONTRACT_ADDRESS,
-      abi: CONTRACT_ABI,
-      functionName: "claim",
-      args: [
-        BigInt(campaignId),
-        BigInt(index),
-        address,
-        parseEther(claimAmount),
-        merkleProof,
-      ],
-    });
+    if (proofError) {
+      alert(`Error: ${proofError}`);
+      return;
+    }
+
+    try {
+      setIsClaiming(true);
+      const hash = await writeContract(config, {
+        address: CONTRACT_ADDRESS,
+        abi: CONTRACT_ABI,
+        functionName: "claim",
+        args: [
+          BigInt(campaignId),
+          BigInt(userLeaf.index),
+          address,
+          userLeaf.amount,
+          merkleProof,
+        ],
+      });
+      setClaimHash(hash);
+    } catch (error) {
+      console.error("Error claiming reward:", error);
+      alert("Failed to claim reward. Please try again.");
+    } finally {
+      setIsClaiming(false);
+    }
   };
 
   if (!isConnected) {
@@ -183,7 +217,7 @@ export default function UserClaim() {
 
             <div className="flex items-end">
               <button
-                onClick={handleCheckClaimStatus}
+                onClick={handleCheckCampaign}
                 className="w-full px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition"
               >
                 Check Campaign Info
@@ -219,83 +253,58 @@ export default function UserClaim() {
             </div>
           )}
 
+          {/* User Reward Info */}
+          {userLeaf && (
+            <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+              <h3 className="font-semibold mb-3 text-gray-900 dark:text-white">
+                Your Reward Information
+              </h3>
+              <div className="space-y-2 text-sm">
+                <p className="text-gray-700 dark:text-gray-300">
+                  <span className="font-medium">Index:</span> {userLeaf.index}
+                </p>
+                <p className="text-gray-700 dark:text-gray-300">
+                  <span className="font-medium">Amount:</span>{" "}
+                  {formatEther(userLeaf.amount)} ETH
+                </p>
+                <p className="text-gray-700 dark:text-gray-300">
+                  <span className="font-medium">Account:</span>{" "}
+                  <span className="font-mono text-xs">{address}</span>
+                </p>
+              </div>
+            </div>
+          )}
+
+          {proofError && (
+            <div className="p-4 bg-red-100 dark:bg-red-900 rounded-lg">
+              <p className="text-red-800 dark:text-red-200 text-sm">
+                ⚠️ {proofError}
+              </p>
+            </div>
+          )}
+
           {/* Claim Form */}
           <div className="border-t border-gray-200 dark:border-gray-700 pt-6">
             <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">
-              Claim Details
+              Claim Your Reward
             </h3>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Your Index *
-                </label>
-                <input
-                  type="number"
-                  value={index}
-                  onChange={(e) => setIndex(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                  placeholder="0"
-                />
+            {merkleProof.length > 0 && (
+              <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg mb-4">
+                <p className="text-blue-800 dark:text-blue-200 text-sm mb-2">
+                  ✓ Merkle proof generated automatically ({merkleProof.length}{" "}
+                  elements)
+                </p>
+                <details className="mt-2">
+                  <summary className="text-xs text-blue-600 dark:text-blue-400 cursor-pointer">
+                    View Proof
+                  </summary>
+                  <pre className="mt-2 text-xs font-mono bg-white dark:bg-gray-800 p-2 rounded overflow-auto">
+                    {JSON.stringify(merkleProof, null, 2)}
+                  </pre>
+                </details>
               </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Claim Amount (ETH) *
-                </label>
-                <input
-                  type="text"
-                  value={claimAmount}
-                  onChange={(e) => setClaimAmount(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                  placeholder="10"
-                />
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Merkle Root
-              </label>
-              <input
-                type="text"
-                value={merkleRoot}
-                onChange={(e) => setMerkleRoot(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
-                placeholder="0x..."
-              />
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Merkle Proof (JSON Array) *
-              </label>
-              <textarea
-                value={proofInput}
-                onChange={(e) => setProofInput(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
-                rows={4}
-                placeholder='["0x...", "0x...", "0x..."]'
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Paste your merkle proof as a JSON array of hex strings
-              </p>
-            </div>
-
-            <div className="flex space-x-4 mb-4">
-              <button
-                onClick={handleGenerateProof}
-                className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
-              >
-                Load Proof
-              </button>
-              <button
-                onClick={handleCheckClaimStatus}
-                className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition"
-              >
-                Check Claim Status
-              </button>
-            </div>
+            )}
 
             {isClaimed !== null && (
               <div
@@ -319,21 +328,15 @@ export default function UserClaim() {
               </div>
             )}
 
-            {merkleProof.length > 0 && (
-              <div className="p-4 bg-blue-100 dark:bg-blue-900 rounded-lg mb-4">
-                <p className="text-blue-800 dark:text-blue-200 text-sm">
-                  ✓ Proof loaded ({merkleProof.length} elements)
-                </p>
-              </div>
-            )}
-
             <button
               onClick={handleClaim}
               disabled={
                 isClaiming ||
                 isConfirming ||
                 isClaimed === true ||
-                merkleProof.length === 0
+                merkleProof.length === 0 ||
+                !userLeaf ||
+                !!proofError
               }
               className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
             >
@@ -341,6 +344,10 @@ export default function UserClaim() {
                 ? "Claiming..."
                 : isClaimSuccess
                 ? "Claimed Successfully!"
+                : !userLeaf
+                ? "Enter Campaign ID to Find Your Reward"
+                : merkleProof.length === 0
+                ? "Generating Proof..."
                 : "Claim Reward"}
             </button>
 
@@ -354,12 +361,11 @@ export default function UserClaim() {
           </div>
 
           {/* Info Box */}
-          <div className="mt-6 p-4 bg-yellow-100 dark:bg-yellow-900 rounded-lg">
-            <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              <strong>Note:</strong> In production, the merkle proof should be
-              generated by your backend service based on the campaign's merkle
-              root and your claim details. The proof verifies that your address
-              and amount are included in the campaign's reward distribution.
+          <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+            <p className="text-sm text-blue-800 dark:text-blue-200">
+              <strong>How it works:</strong> Enter the campaign ID and the system
+              will automatically find your reward, generate the merkle proof, and
+              allow you to claim. No manual input required!
             </p>
           </div>
         </div>

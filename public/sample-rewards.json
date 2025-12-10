@@ -1,0 +1,23 @@
+[
+  {
+    "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+    "amount": "100.5"
+  },
+  {
+    "address": "0x8ba1f109551bD432803012645Aac136c22C172e8",
+    "amount": "250.75"
+  },
+  {
+    "address": "0x1234567890123456789012345678901234567890",
+    "amount": "50.0"
+  },
+  {
+    "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+    "amount": "75.25"
+  },
+  {
+    "address": "0x9876543210987654321098765432109876543210",
+    "amount": "200.0"
+  }
+]
+
