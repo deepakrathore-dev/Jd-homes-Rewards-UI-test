@@ -11,16 +11,20 @@ import { parseEther, formatEther } from "viem";
 import { config } from "@/app/config/WagmiConfig";
 import {
   CONTRACT_ADDRESS,
-  CONTRACT_ABI,
   ADMIN_ADDRESS,
   ERC20_ABI,
 } from "@/app/config/contract";
+import CONTRACT_ABI from "@/app/utils/contractABI.json";
 import {
   generateMerkleTree,
   getMerkleRoot,
   type MerkleLeaf,
 } from "@/app/utils/merkle";
 import { storeMerkleLeaves } from "@/app/utils/merkleStorage";
+import { waitForTransactionReceipt } from "@wagmi/core";
+
+
+
 
 export default function AdminDashboard() {
   const { address, isConnected } = useAccount();
@@ -47,36 +51,50 @@ export default function AdminDashboard() {
   const [tokenBalance, setTokenBalance] = useState<bigint | null>(null);
 
   // Transaction state
-  const [createHash, setCreateHash] = useState<`0x${string}` | undefined>();
-  const [fundHash, setFundHash] = useState<`0x${string}` | undefined>();
-  const [approveHash, setApproveHash] = useState<`0x${string}` | undefined>();
   const [isCreating, setIsCreating] = useState(false);
   const [isFunding, setIsFunding] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
+  const [isCreateSuccess, setIsCreateSuccess] = useState(false);
+  const [isApproveSuccess, setIsApproveSuccess] = useState(false);
+  const [isFundSuccess, setIsFundSuccess] = useState(false);
 
-  const { isLoading: isConfirmingCreate, isSuccess: isCreateSuccess } =
-    useWaitForTransactionReceipt({
-      hash: createHash,
-    });
 
-  const { isLoading: isConfirmingFund, isSuccess: isFundSuccess } =
-    useWaitForTransactionReceipt({
-      hash: fundHash,
-    });
 
-  const { isLoading: isConfirmingApprove, isSuccess: isApproveSuccess } =
-    useWaitForTransactionReceipt({
-      hash: approveHash,
-    });
+  //campaign retunr type
+
+  type Campaign = {
+    token: `0x${string}`;
+    merkleRoot: `0x${string}`;
+    totalAllocation: bigint;
+    totalFunded: bigint;
+    totalClaimed: bigint;
+    expiry: bigint;
+    active: boolean;
+  };
+
+
+  type CampaignTuple = [
+    string,   // token
+    string,   // merkleRoot
+    bigint,   // totalAllocation
+    bigint,   // totalFunded
+    bigint,   // totalClaimed
+    bigint,   // expiry
+    boolean   // active
+  ];
+
+
 
   // Read campaign token address
-  const { data: campaignData } = useReadContract({
+  const { data } = useReadContract({
     address: CONTRACT_ADDRESS,
-    abi: CONTRACT_ABI,
+    abi: CONTRACT_ABI.abi,
     functionName: "campaigns",
     args: fundCampaignId ? [BigInt(fundCampaignId)] : undefined,
     query: { enabled: !!fundCampaignId },
   });
+
+  const campaignData = data as CampaignTuple;
 
   // Read token allowance
   const { data: currentAllowance, refetch: refetchAllowance } = useReadContract(
@@ -102,8 +120,8 @@ export default function AdminDashboard() {
   // Update token address when campaign data changes
   useEffect(() => {
     if (campaignData) {
-      const token = campaignData[0] as `0x${string}`;
-      setFundTokenAddress(token);
+      const token = campaignData as CampaignTuple;
+      setFundTokenAddress(token[0] as `0x${string}`);
     } else {
       setFundTokenAddress(null);
     }
@@ -131,11 +149,15 @@ export default function AdminDashboard() {
   }, [isApproveSuccess, refetchAllowance]);
 
   // Read next campaign ID
-  const { data: nextCampaignId } = useReadContract({
+  const { data: nextcampaign } = useReadContract({
     address: CONTRACT_ADDRESS,
-    abi: CONTRACT_ABI,
+    abi: CONTRACT_ABI.abi,
     functionName: "nextCampaignId",
   });
+
+  const nextCampaignId = nextcampaign as bigint | undefined;
+
+
 
   // Store leaves after campaign is created
   useEffect(() => {
@@ -290,7 +312,7 @@ export default function AdminDashboard() {
       setIsCreating(true);
       const hash = await writeContract(config, {
         address: CONTRACT_ADDRESS,
-        abi: CONTRACT_ABI,
+        abi: CONTRACT_ABI.abi,
         functionName: "createCampaign",
         args: [
           BigInt(propertyId),
@@ -301,7 +323,15 @@ export default function AdminDashboard() {
           active,
         ],
       });
-      setCreateHash(hash);
+
+      const receipt = await waitForTransactionReceipt(config, {
+        hash,
+      });
+
+      if (receipt) {
+        setIsCreating(false);
+        setIsCreateSuccess(true);
+      }
     } catch (error) {
       console.error("Error creating campaign:", error);
       alert("Failed to create campaign. Please try again.");
@@ -328,7 +358,14 @@ export default function AdminDashboard() {
         functionName: "approve",
         args: [CONTRACT_ADDRESS, approveAmount],
       });
-      setApproveHash(hash);
+      const receipt = await waitForTransactionReceipt(config, {
+        hash,
+      });
+
+      if (receipt) {
+        setIsApproving(false);
+        setIsApproveSuccess(true);
+      }
     } catch (error) {
       console.error("Error approving token:", error);
       alert("Failed to approve token. Please try again.");
@@ -353,8 +390,7 @@ export default function AdminDashboard() {
     // Check if approval is needed
     if (allowance === null || allowance < amount) {
       alert(
-        `Insufficient allowance. Current: ${
-          allowance !== null ? formatEther(allowance) : "0"
+        `Insufficient allowance. Current: ${allowance !== null ? formatEther(allowance) : "0"
         }, Required: ${formatEther(amount)}. Please approve first.`
       );
       return;
@@ -363,8 +399,7 @@ export default function AdminDashboard() {
     // Check balance
     if (tokenBalance === null || tokenBalance < amount) {
       alert(
-        `Insufficient balance. Current: ${
-          tokenBalance !== null ? formatEther(tokenBalance) : "0"
+        `Insufficient balance. Current: ${tokenBalance !== null ? formatEther(tokenBalance) : "0"
         }, Required: ${formatEther(amount)}`
       );
       return;
@@ -374,11 +409,18 @@ export default function AdminDashboard() {
       setIsFunding(true);
       const hash = await writeContract(config, {
         address: CONTRACT_ADDRESS,
-        abi: CONTRACT_ABI,
+        abi: CONTRACT_ABI.abi,
         functionName: "fundCampaign",
         args: [BigInt(fundCampaignId), amount],
       });
-      setFundHash(hash);
+      const receipt = await waitForTransactionReceipt(config, {
+        hash,
+      });
+
+      if (receipt) {
+        setIsFunding(false);
+        setIsFundSuccess(true);
+      }
     } catch (error) {
       console.error("Error funding campaign:", error);
       alert("Failed to fund campaign. Please try again.");
@@ -420,21 +462,19 @@ export default function AdminDashboard() {
         <div className="flex space-x-4 mb-6 border-b border-gray-200 dark:border-gray-700">
           <button
             onClick={() => setActiveTab("create")}
-            className={`px-4 py-2 font-medium ${
-              activeTab === "create"
-                ? "text-blue-600 border-b-2 border-blue-600 dark:text-blue-400"
-                : "text-gray-600 dark:text-gray-400"
-            }`}
+            className={`px-4 py-2 font-medium ${activeTab === "create"
+              ? "text-blue-600 border-b-2 border-blue-600 dark:text-blue-400"
+              : "text-gray-600 dark:text-gray-400"
+              }`}
           >
             Create Campaign
           </button>
           <button
             onClick={() => setActiveTab("fund")}
-            className={`px-4 py-2 font-medium ${
-              activeTab === "fund"
-                ? "text-blue-600 border-b-2 border-blue-600 dark:text-blue-400"
-                : "text-gray-600 dark:text-gray-400"
-            }`}
+            className={`px-4 py-2 font-medium ${activeTab === "fund"
+              ? "text-blue-600 border-b-2 border-blue-600 dark:text-blue-400"
+              : "text-gray-600 dark:text-gray-400"
+              }`}
           >
             Fund Campaign
           </button>
@@ -509,6 +549,7 @@ export default function AdminDashboard() {
             </div>
 
             {/* Merkle Tree Builder */}
+
             <div className="border-t border-gray-200 dark:border-gray-700 pt-6">
               <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">
                 Load Rewards from JSON
@@ -630,15 +671,16 @@ export default function AdminDashboard() {
 
             <button
               onClick={handleCreateCampaign}
-              disabled={isCreating || isConfirmingCreate || !merkleRoot}
+              disabled={isCreating || !merkleRoot}
               className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
             >
-              {isCreating || isConfirmingCreate
+              {isCreating
                 ? "Creating Campaign..."
                 : isCreateSuccess
-                ? "Campaign Created!"
-                : "Create Campaign"}
+                  ? "Campaign Created!"
+                  : "Create Campaign"}
             </button>
+
 
             {isCreateSuccess && nextCampaignId && (
               <div className="p-4 bg-green-100 dark:bg-green-900 rounded-lg">
@@ -726,11 +768,10 @@ export default function AdminDashboard() {
             {/* Approval Status */}
             {fundTokenAddress && fundAmount && allowance !== null && (
               <div
-                className={`p-4 rounded-lg ${
-                  allowance >= parseEther(fundAmount)
-                    ? "bg-green-100 dark:bg-green-900"
-                    : "bg-yellow-100 dark:bg-yellow-900"
-                }`}
+                className={`p-4 rounded-lg ${allowance >= parseEther(fundAmount)
+                  ? "bg-green-100 dark:bg-green-900"
+                  : "bg-yellow-100 dark:bg-yellow-900"
+                  }`}
               >
                 {allowance >= parseEther(fundAmount) ? (
                   <p className="text-green-800 dark:text-green-200">
@@ -765,20 +806,20 @@ export default function AdminDashboard() {
                 onClick={handleApproveToken}
                 disabled={
                   isApproving ||
-                  isConfirmingApprove ||
+
                   !fundTokenAddress ||
                   !fundAmount ||
                   (allowance !== null && allowance >= parseEther(fundAmount))
                 }
                 className="w-full px-6 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
               >
-                {isApproving || isConfirmingApprove
+                {isApproving
                   ? "Approving..."
                   : isApproveSuccess
-                  ? "Approved!"
-                  : allowance !== null && allowance >= parseEther(fundAmount)
-                  ? "Already Approved"
-                  : "Approve Tokens"}
+                    ? "Approved!"
+                    : allowance !== null && allowance >= parseEther(fundAmount)
+                      ? "Already Approved"
+                      : "Approve Tokens"}
               </button>
             )}
 
@@ -795,7 +836,6 @@ export default function AdminDashboard() {
               onClick={handleFundCampaign}
               disabled={
                 isFunding ||
-                isConfirmingFund ||
                 !fundCampaignId ||
                 !fundAmount ||
                 !fundTokenAddress ||
@@ -804,17 +844,17 @@ export default function AdminDashboard() {
               }
               className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
             >
-              {isFunding || isConfirmingFund
+              {isFunding
                 ? "Funding Campaign..."
                 : isFundSuccess
-                ? "Campaign Funded!"
-                : !fundTokenAddress
-                ? "Enter Campaign ID First"
-                : allowance !== null && allowance < parseEther(fundAmount)
-                ? "Approve Tokens First"
-                : tokenBalance !== null && tokenBalance < parseEther(fundAmount)
-                ? "Insufficient Balance"
-                : "Fund Campaign"}
+                  ? "Campaign Funded!"
+                  : !fundTokenAddress
+                    ? "Enter Campaign ID First"
+                    : allowance !== null && allowance < parseEther(fundAmount)
+                      ? "Approve Tokens First"
+                      : tokenBalance !== null && tokenBalance < parseEther(fundAmount)
+                        ? "Insufficient Balance"
+                        : "Fund Campaign"}
             </button>
 
             {isFundSuccess && (

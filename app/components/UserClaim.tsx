@@ -9,7 +9,9 @@ import {
 import { writeContract } from "@wagmi/core";
 import { parseEther, formatEther, type Address } from "viem";
 import { config } from "@/app/config/WagmiConfig";
-import { CONTRACT_ADDRESS, CONTRACT_ABI } from "@/app/config/contract";
+import { CONTRACT_ADDRESS } from "@/app/config/contract";
+import CONTRACT_ABI from "@/app/utils/contractABI.json";
+
 import {
   generateMerkleTree,
   getMerkleProof,
@@ -20,15 +22,25 @@ import {
   findLeafByAccount,
 } from "@/app/utils/merkleStorage";
 
-interface CampaignInfo {
-  token: Address;
+type Campaign = {
+  token: `0x${string}`;
   merkleRoot: `0x${string}`;
   totalAllocation: bigint;
   totalFunded: bigint;
   totalClaimed: bigint;
   expiry: bigint;
   active: boolean;
-}
+};
+
+type CampaignTuple = [
+  string,   // token
+  string,   // merkleRoot
+  bigint,   // totalAllocation
+  bigint,   // totalFunded
+  bigint,   // totalClaimed
+  bigint,   // expiry
+  boolean   // active
+];
 
 export default function UserClaim() {
   const { address, isConnected } = useAccount();
@@ -36,7 +48,7 @@ export default function UserClaim() {
   const [userLeaf, setUserLeaf] = useState<MerkleLeaf | null>(null);
   const [merkleProof, setMerkleProof] = useState<`0x${string}`[]>([]);
   const [isClaimed, setIsClaimed] = useState<boolean | null>(null);
-  const [campaignInfo, setCampaignInfo] = useState<CampaignInfo | null>(null);
+  const [campaignInfo, setCampaignInfo] = useState<Campaign | null>(null);
   const [proofError, setProofError] = useState<string>("");
   const [claimHash, setClaimHash] = useState<`0x${string}` | undefined>();
   const [isClaiming, setIsClaiming] = useState(false);
@@ -47,18 +59,22 @@ export default function UserClaim() {
     });
 
   // Read campaign info
-  const { data: campaignData, refetch: refetchCampaign } = useReadContract({
+  const { data, refetch: refetchCampaign } = useReadContract({
     address: CONTRACT_ADDRESS,
-    abi: CONTRACT_ABI,
+    abi: CONTRACT_ABI.abi,
     functionName: "campaigns",
     args: campaignId ? [BigInt(campaignId)] : undefined,
     query: { enabled: !!campaignId },
   });
 
+  const campaignData = data as CampaignTuple;
+
+  console.log("Campaign Data:", campaignData);
+
   // Check if already claimed
   const { data: claimedStatus, refetch: refetchClaimed } = useReadContract({
     address: CONTRACT_ADDRESS,
-    abi: CONTRACT_ABI,
+    abi: CONTRACT_ABI.abi,
     functionName: "isClaimed",
     args:
       campaignId && userLeaf
@@ -70,13 +86,13 @@ export default function UserClaim() {
   useEffect(() => {
     if (campaignData) {
       setCampaignInfo({
-        token: campaignData[0] as Address,
+        token: campaignData[0] as `0x${string}`,
         merkleRoot: campaignData[1] as `0x${string}`,
-        totalAllocation: campaignData[2] as bigint,
-        totalFunded: campaignData[3] as bigint,
-        totalClaimed: campaignData[4] as bigint,
-        expiry: campaignData[5] as bigint,
-        active: campaignData[6] as boolean,
+        totalAllocation: campaignData[2],
+        totalFunded: campaignData[3],
+        totalClaimed: campaignData[4],
+        expiry: campaignData[5],
+        active: campaignData[6],
       });
     }
   }, [campaignData]);
@@ -89,6 +105,7 @@ export default function UserClaim() {
 
   // Auto-find user's leaf and generate proof when campaign ID changes
   useEffect(() => {
+    console.log("Generating proof for campaign ID:", campaignId);
     if (!campaignId || !address || !isConnected) {
       setUserLeaf(null);
       setMerkleProof([]);
@@ -98,6 +115,7 @@ export default function UserClaim() {
 
     // Find user's leaf
     const leaf = findLeafByAccount(Number(campaignId), address);
+    console.log("Found leaf for user:", leaf);
     if (!leaf) {
       setUserLeaf(null);
       setMerkleProof([]);
@@ -163,7 +181,7 @@ export default function UserClaim() {
       setIsClaiming(true);
       const hash = await writeContract(config, {
         address: CONTRACT_ADDRESS,
-        abi: CONTRACT_ABI,
+        abi: CONTRACT_ABI.abi,
         functionName: "claim",
         args: [
           BigInt(campaignId),
@@ -235,10 +253,13 @@ export default function UserClaim() {
                   Token: <span className="font-mono">{campaignInfo.token}</span>
                 </p>
                 <p className="text-gray-700 dark:text-gray-300">
-                  Total Funded: {formatEther(campaignInfo.totalFunded)} ETH
+                  Total Allocation: {formatEther(campaignInfo.totalAllocation)} USDT
                 </p>
                 <p className="text-gray-700 dark:text-gray-300">
-                  Total Claimed: {formatEther(campaignInfo.totalClaimed)} ETH
+                  Total Funded: {formatEther(campaignInfo.totalFunded)} USDT
+                </p>
+                <p className="text-gray-700 dark:text-gray-300">
+                  Total Claimed: {formatEther(campaignInfo.totalClaimed)} USDT
                 </p>
                 <p className="text-gray-700 dark:text-gray-300">
                   Active: {campaignInfo.active ? "Yes" : "No"}
@@ -308,11 +329,10 @@ export default function UserClaim() {
 
             {isClaimed !== null && (
               <div
-                className={`p-4 rounded-lg mb-4 ${
-                  isClaimed
-                    ? "bg-red-100 dark:bg-red-900"
-                    : "bg-green-100 dark:bg-green-900"
-                }`}
+                className={`p-4 rounded-lg mb-4 ${isClaimed
+                  ? "bg-red-100 dark:bg-red-900"
+                  : "bg-green-100 dark:bg-green-900"
+                  }`}
               >
                 <p
                   className={
@@ -343,12 +363,12 @@ export default function UserClaim() {
               {isClaiming || isConfirming
                 ? "Claiming..."
                 : isClaimSuccess
-                ? "Claimed Successfully!"
-                : !userLeaf
-                ? "Enter Campaign ID to Find Your Reward"
-                : merkleProof.length === 0
-                ? "Generating Proof..."
-                : "Claim Reward"}
+                  ? "Claimed Successfully!"
+                  : !userLeaf
+                    ? "Enter Campaign ID to Find Your Reward"
+                    : merkleProof.length === 0
+                      ? "Generating Proof..."
+                      : "Claim Reward"}
             </button>
 
             {isClaimSuccess && (
