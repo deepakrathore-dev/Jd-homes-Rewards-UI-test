@@ -13,7 +13,7 @@ export default function Nav() {
     ">
             <div className="text-lg font-semibold text-black dark:text-white">
                 {/* Add Logo or Brand Name here */}
-                MyApp
+                JD Home Rewards
             </div>
 
             <ConnectButton />

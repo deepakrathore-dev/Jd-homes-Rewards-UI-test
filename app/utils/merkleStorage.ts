@@ -1,6 +1,7 @@
 import type { MerkleLeaf } from "./merkle";
 
 const STORAGE_PREFIX = "merkle_leaves_";
+const PROPERTY_PREFIX = "campaign_property_";
 
 /**
  * Store merkle leaves for a campaign
@@ -12,7 +13,7 @@ export function storeMerkleLeaves(
 ): void {
   if (typeof window === "undefined") return;
 
-  const key = `${STORAGE_PREFIX}${campaignId}`;
+  const key = `${STORAGE_PREFIX}${campaignId - 1}`;
   const serialized = leaves.map((leaf) => ({
     index: leaf.index,
     account: leaf.account,
@@ -28,7 +29,9 @@ export function storeMerkleLeaves(
 export function getMerkleLeaves(campaignId: number): MerkleLeaf[] | null {
   if (typeof window === "undefined") return null;
 
-  const key = `${STORAGE_PREFIX}${campaignId}`;
+  const key = `${STORAGE_PREFIX}${campaignId - 1}`;
+
+  console.log("Retrieving merkle leaves from key:", key);
   const stored = localStorage.getItem(key);
 
   if (!stored) return null;
@@ -44,6 +47,30 @@ export function getMerkleLeaves(campaignId: number): MerkleLeaf[] | null {
     console.error("Error parsing stored merkle leaves:", e);
     return null;
   }
+}
+
+/**
+ * Store propertyId for a campaign (local)
+ */
+export function storeCampaignProperty(
+  campaignId: number,
+  propertyId: number
+): void {
+  if (typeof window === "undefined") return;
+  const key = `${PROPERTY_PREFIX}${campaignId - 1}`;
+  localStorage.setItem(key, propertyId.toString());
+}
+
+/**
+ * Retrieve propertyId for a campaign (local)
+ */
+export function getCampaignProperty(campaignId: number): number | null {
+  if (typeof window === "undefined") return null;
+  const key = `${PROPERTY_PREFIX}${campaignId - 1}`;
+  const stored = localStorage.getItem(key);
+  if (!stored) return null;
+  const parsed = Number(stored);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 /**

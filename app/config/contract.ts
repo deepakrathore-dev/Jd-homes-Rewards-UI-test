@@ -2,7 +2,7 @@
 // Replace with actual values when available
 
 export const CONTRACT_ADDRESS =
-  "0x110e872bEf14664c1b5dd13112Cae6087Ed1BD30" as const; // Dummy address - replace with actual
+  "0x3180320aa14943e527a90aE3Dd681F48c7E72B2F" as const; // Dummy address - replace with actual
 
 // Dummy admin address - replace with actual
 export const ADMIN_ADDRESS =

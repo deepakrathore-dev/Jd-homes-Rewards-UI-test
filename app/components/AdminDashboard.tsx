@@ -1,30 +1,35 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import {
-  useAccount,
-  useWaitForTransactionReceipt,
-  useReadContract,
-} from "wagmi";
-import { writeContract } from "@wagmi/core";
-import { parseEther, formatEther } from "viem";
+import { useState, useEffect, ReactNode } from "react";
+import { useAccount, useReadContract } from "wagmi";
+import { readContract, writeContract } from "@wagmi/core";
+import { formatUnits, parseUnits, parseAbi } from "viem";
 import { config } from "@/app/config/WagmiConfig";
-import {
-  CONTRACT_ADDRESS,
-  ADMIN_ADDRESS,
-  ERC20_ABI,
-} from "@/app/config/contract";
+import { CONTRACT_ADDRESS, ADMIN_ADDRESS } from "@/app/config/contract";
 import CONTRACT_ABI from "@/app/utils/contractABI.json";
 import {
   generateMerkleTree,
   getMerkleRoot,
   type MerkleLeaf,
 } from "@/app/utils/merkle";
-import { storeMerkleLeaves } from "@/app/utils/merkleStorage";
+import {
+  storeMerkleLeaves,
+  storeCampaignProperty,
+  getCampaignProperty,
+} from "@/app/utils/merkleStorage";
 import { waitForTransactionReceipt } from "@wagmi/core";
+import { useToken } from "@/app/components/hooks/useToken";
 
+const metadataAbi = parseAbi([
+  "function symbol() view returns (string)",
+  "function name() view returns (string)",
+  "function decimals() view returns (uint8)",
+]);
 
-
+const DEFAULT_TOKEN = {
+  label: "USDT",
+  address: "0x17B8334F89209Cda855F55201e0C99E838A21784" as `0x${string}`,
+};
 
 export default function AdminDashboard() {
   const { address, isConnected } = useAccount();
@@ -32,7 +37,9 @@ export default function AdminDashboard() {
 
   // Create Campaign State
   const [propertyId, setPropertyId] = useState("");
-  const [tokenAddress, setTokenAddress] = useState("");
+  const [tokenAddress, setTokenAddress] = useState<`0x${string}`>(
+    DEFAULT_TOKEN.address
+  );
   const [totalAllocation, setTotalAllocation] = useState("");
   const [expiry, setExpiry] = useState("");
   const [active, setActive] = useState(true);
@@ -47,8 +54,8 @@ export default function AdminDashboard() {
   const [fundTokenAddress, setFundTokenAddress] = useState<
     `0x${string}` | null
   >(null);
-  const [allowance, setAllowance] = useState<bigint | null>(null);
-  const [tokenBalance, setTokenBalance] = useState<bigint | null>(null);
+  const [fundPropertyId, setFundPropertyId] = useState<number | null>(null);
+  // allowance and balance are provided by useToken hook below
 
   // Transaction state
   const [isCreating, setIsCreating] = useState(false);
@@ -58,7 +65,18 @@ export default function AdminDashboard() {
   const [isApproveSuccess, setIsApproveSuccess] = useState(false);
   const [isFundSuccess, setIsFundSuccess] = useState(false);
 
+  // Token metadata from the token contract
+  const [createTokenMeta, setCreateTokenMeta] = useState<{
+    symbol: string;
+    name: string;
+    decimals: number;
+  }>({ symbol: "", name: "", decimals: 18 });
 
+  const [fundTokenMeta, setFundTokenMeta] = useState<{
+    symbol: string;
+    name: string;
+    decimals: number;
+  }>({ symbol: "", name: "", decimals: 18 });
 
   //campaign retunr type
 
@@ -96,25 +114,36 @@ export default function AdminDashboard() {
 
   const campaignData = data as CampaignTuple;
 
-  // Read token allowance
-  const { data: currentAllowance, refetch: refetchAllowance } = useReadContract(
-    {
-      address: fundTokenAddress || undefined,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args:
-        address && fundTokenAddress ? [address, CONTRACT_ADDRESS] : undefined,
-      query: { enabled: !!address && !!fundTokenAddress },
-    }
-  );
-
-  // Read token balance
-  const { data: balance } = useReadContract({
-    address: fundTokenAddress || undefined,
-    abi: ERC20_ABI,
-    functionName: "balanceOf",
-    args: address ? [address] : undefined,
-    query: { enabled: !!address && !!fundTokenAddress },
+  // Token helper hook (reads allowance & balance, handles approve)
+  const {
+    allowance,
+    balance: tokenBalance,
+    approve,
+    fetchAllowance,
+    getTokenMetadata,
+  } = useToken({
+    token: fundTokenAddress ?? undefined,
+    owner: address ?? undefined,
+    spender: CONTRACT_ADDRESS,
+    onPrompt: () => {
+      setIsApproving(true);
+    },
+    onSubmitted: () => {
+      // optionally show submitted status
+    },
+    onSuccess: async () => {
+      setIsApproving(false);
+      setIsApproveSuccess(true);
+      // wait briefly to allow the allowance view to update onchain
+      setTimeout(() => {
+        fetchAllowance().catch(() => {
+          // ignore
+        });
+      }, 1500);
+    },
+    onError: () => {
+      setIsApproving(false);
+    },
   });
 
   // Update token address when campaign data changes
@@ -122,31 +151,85 @@ export default function AdminDashboard() {
     if (campaignData) {
       const token = campaignData as CampaignTuple;
       setFundTokenAddress(token[0] as `0x${string}`);
+      const localProperty = getCampaignProperty(Number(fundCampaignId));
+      setFundPropertyId(localProperty);
     } else {
       setFundTokenAddress(null);
+      setFundPropertyId(null);
     }
-  }, [campaignData]);
+  }, [campaignData, fundCampaignId]);
 
-  // Update allowance when it changes
+  // When token or account changes, fetch allowance/balance and metadata
   useEffect(() => {
-    if (currentAllowance !== undefined) {
-      setAllowance(currentAllowance as bigint);
-    }
-  }, [currentAllowance]);
+    if (!fundTokenAddress) return;
+    (async () => {
+      try {
+        await fetchAllowance();
+      } catch (e) {
+        // ignore
+      }
 
-  // Update balance when it changes
+      try {
+        const meta = await getTokenMetadata();
+        setFundTokenMeta(meta);
+      } catch (e) {
+        // leave defaults
+      }
+    })();
+  }, [fundTokenAddress, address, fetchAllowance, getTokenMetadata]);
+
+  // Fetch token metadata for create flow when token address changes
   useEffect(() => {
-    if (balance !== undefined) {
-      setTokenBalance(balance as bigint);
+    if (!tokenAddress) {
+      setCreateTokenMeta({ symbol: "", name: "", decimals: 18 });
+      return;
     }
-  }, [balance]);
 
-  // Refetch allowance after approval
+    let cancelled = false;
+    (async () => {
+      try {
+        const [symbol, name, decimals] = await Promise.all([
+          readContract(config, {
+            address: tokenAddress as `0x${string}`,
+            abi: metadataAbi,
+            functionName: "symbol",
+          }),
+          readContract(config, {
+            address: tokenAddress as `0x${string}`,
+            abi: metadataAbi,
+            functionName: "name",
+          }),
+          readContract(config, {
+            address: tokenAddress as `0x${string}`,
+            abi: metadataAbi,
+            functionName: "decimals",
+          }),
+        ]);
+        if (!cancelled) {
+          setCreateTokenMeta({
+            symbol: symbol as string,
+            name: name as string,
+            decimals: Number(decimals),
+          });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setCreateTokenMeta({ symbol: "", name: "", decimals: 18 });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tokenAddress]);
+
+  // When an approval completes elsewhere, refresh allowance
   useEffect(() => {
     if (isApproveSuccess) {
-      refetchAllowance();
+      fetchAllowance().catch(() => { });
     }
-  }, [isApproveSuccess, refetchAllowance]);
+  }, [isApproveSuccess, fetchAllowance]);
 
   // Read next campaign ID
   const { data: nextcampaign } = useReadContract({
@@ -165,10 +248,80 @@ export default function AdminDashboard() {
       // Campaign ID is nextCampaignId - 1 (since it was incremented after creation)
       const createdCampaignId = Number(nextCampaignId) - 1;
       storeMerkleLeaves(createdCampaignId, merkleLeaves);
+      const propIdNum = Number(propertyId);
+      if (!Number.isNaN(propIdNum)) {
+        storeCampaignProperty(createdCampaignId, propIdNum);
+      }
     }
-  }, [isCreateSuccess, nextCampaignId, merkleLeaves]);
+  }, [isCreateSuccess, nextCampaignId, merkleLeaves, propertyId]);
 
   const isAdmin = address?.toLowerCase() === ADMIN_ADDRESS.toLowerCase();
+
+  // required token amount for the current fundAmount input (uses token decimals)
+  const requiredAmount =
+    fundAmount && fundAmount.trim() !== ""
+      ? parseUnits(fundAmount, fundTokenMeta.decimals)
+      : BigInt(0);
+
+  const tokenInfoRows: { label: string; value: ReactNode }[] = (
+    fundTokenAddress && fundCampaignId
+      ? ([
+        fundPropertyId !== null
+          ? {
+            label: "Property ID",
+            value: fundPropertyId.toString(),
+          }
+          : null,
+        {
+          label: "Token Address",
+          value: (
+            <span className="font-mono text-xs break-all">
+              {fundTokenAddress}
+            </span>
+          ),
+        },
+        {
+          label: "Your Balance",
+          value: `${formatUnits(tokenBalance, fundTokenMeta.decimals)} ${fundTokenMeta.symbol || "tokens"
+            }`,
+        },
+        {
+          label: "Current Allowance",
+          value: `${formatUnits(allowance, fundTokenMeta.decimals)} ${fundTokenMeta.symbol || "tokens"
+            }`,
+        },
+        fundAmount
+          ? {
+            label: "Required Amount",
+            value: `${formatUnits(requiredAmount, fundTokenMeta.decimals)} ${fundTokenMeta.symbol || "tokens"
+              }`,
+          }
+          : null,
+        campaignData
+          ? {
+            label: "Currently Funded",
+            value: `${formatUnits(
+              campaignData[3],
+              fundTokenMeta.decimals
+            )} ${fundTokenMeta.symbol || "tokens"}`,
+          }
+          : null,
+        campaignData
+          ? {
+            label: "Remaining to Fund",
+            value: `${formatUnits(
+              campaignData[2] > campaignData[3]
+                ? campaignData[2] - campaignData[3]
+                : BigInt(0),
+              fundTokenMeta.decimals
+            )} ${fundTokenMeta.symbol || "tokens"}`,
+          }
+          : null,
+      ] as ({ label: string; value: ReactNode } | null)[])
+      : []
+  ).filter(
+    (row): row is { label: string; value: ReactNode } => row !== null
+  );
 
   // Auto-generate merkle root whenever leaves change
   useEffect(() => {
@@ -180,6 +333,20 @@ export default function AdminDashboard() {
       setMerkleRoot(null);
     }
   }, [merkleLeaves]);
+
+  // Calculate total allocation from uploaded leaves
+  useEffect(() => {
+    if (merkleLeaves.length === 0) {
+      setTotalAllocation("");
+      return;
+    }
+    const sum = merkleLeaves.reduce(
+      (acc, leaf) => acc + leaf.amount,
+      BigInt(0)
+    );
+    const formatted = formatUnits(sum, createTokenMeta.decimals);
+    setTotalAllocation(formatted);
+  }, [merkleLeaves, createTokenMeta.decimals]);
 
   const handleLoadFromJson = () => {
     if (!jsonInput.trim()) {
@@ -207,8 +374,11 @@ export default function AdminDashboard() {
           );
         }
 
-        // Parse amount with 18 decimals
-        const amount = parseEther(item.amount.toString());
+        // Parse amount with token decimals
+        const amount = parseUnits(
+          item.amount.toString(),
+          createTokenMeta.decimals
+        );
 
         return {
           index: index,
@@ -260,8 +430,11 @@ export default function AdminDashboard() {
             );
           }
 
-          // Parse amount with 18 decimals
-          const amount = parseEther(item.amount.toString());
+          // Parse amount with token decimals
+          const amount = parseUnits(
+            item.amount.toString(),
+            createTokenMeta.decimals
+          );
 
           return {
             index: index,
@@ -318,7 +491,7 @@ export default function AdminDashboard() {
           BigInt(propertyId),
           tokenAddress as `0x${string}`,
           merkleRoot,
-          parseEther(totalAllocation),
+          parseUnits(totalAllocation, createTokenMeta.decimals),
           BigInt(expiryTimestamp),
           active,
         ],
@@ -345,31 +518,15 @@ export default function AdminDashboard() {
       alert("Please enter campaign ID and amount first");
       return;
     }
-
-    const amount = parseEther(fundAmount);
-    // Approve a bit more than needed to avoid multiple approvals
-    const approveAmount = amount + amount / BigInt(10); // 10% buffer
-
     try {
-      setIsApproving(true);
-      const hash = await writeContract(config, {
-        address: fundTokenAddress,
-        abi: ERC20_ABI,
-        functionName: "approve",
-        args: [CONTRACT_ADDRESS, approveAmount],
-      });
-      const receipt = await waitForTransactionReceipt(config, {
-        hash,
-      });
+      const required = parseUnits(fundAmount, fundTokenMeta.decimals);
 
-      if (receipt) {
-        setIsApproving(false);
-        setIsApproveSuccess(true);
-      }
+
+      await approve(required);
+      // onSuccess from useToken will set isApproveSuccess and refresh allowance
     } catch (error) {
       console.error("Error approving token:", error);
       alert("Failed to approve token. Please try again.");
-    } finally {
       setIsApproving(false);
     }
   };
@@ -385,22 +542,20 @@ export default function AdminDashboard() {
       return;
     }
 
-    const amount = parseEther(fundAmount);
+    const amount = parseUnits(fundAmount, fundTokenMeta.decimals);
 
     // Check if approval is needed
-    if (allowance === null || allowance < amount) {
+    if (allowance < amount) {
       alert(
-        `Insufficient allowance. Current: ${allowance !== null ? formatEther(allowance) : "0"
-        }, Required: ${formatEther(amount)}. Please approve first.`
+        `Insufficient allowance. Current: ${formatUnits(allowance, fundTokenMeta.decimals)}, Required: ${formatUnits(amount, fundTokenMeta.decimals)}. Please approve first.`
       );
       return;
     }
 
     // Check balance
-    if (tokenBalance === null || tokenBalance < amount) {
+    if (tokenBalance < amount) {
       alert(
-        `Insufficient balance. Current: ${tokenBalance !== null ? formatEther(tokenBalance) : "0"
-        }, Required: ${formatEther(amount)}`
+        `Insufficient balance. Current: ${formatUnits(tokenBalance, fundTokenMeta.decimals)}, Required: ${formatUnits(amount, fundTokenMeta.decimals)}`
       );
       return;
     }
@@ -499,27 +654,32 @@ export default function AdminDashboard() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Token Address *
+                  Token *
                 </label>
-                <input
-                  type="text"
+                <select
                   value={tokenAddress}
-                  onChange={(e) => setTokenAddress(e.target.value)}
+                  onChange={(e) =>
+                    setTokenAddress(e.target.value as `0x${string}`)
+                  }
                   className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                  placeholder="0x..."
-                />
+                >
+                  <option value={DEFAULT_TOKEN.address}>
+                    {DEFAULT_TOKEN.label} ({DEFAULT_TOKEN.address})
+                  </option>
+                </select>
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Total Allocation (ETH) *
+                  Total Allocation (USDT) *
                 </label>
                 <input
                   type="text"
                   value={totalAllocation}
                   onChange={(e) => setTotalAllocation(e.target.value)}
+                  readOnly
                   className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                  placeholder="1000"
+                  placeholder="Calculated from uploaded amounts"
                 />
               </div>
 
@@ -586,7 +746,7 @@ export default function AdminDashboard() {
                 />
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   JSON format: Array of objects with "address" and "amount"
-                  fields. Amount uses 18 decimals.
+                  fields.
                 </p>
               </div>
 
@@ -631,7 +791,11 @@ export default function AdminDashboard() {
                                 {leaf.account.slice(0, 10)}...
                               </td>
                               <td className="py-1 px-2 text-right">
-                                {formatEther(leaf.amount)} ETH
+                                {formatUnits(
+                                  leaf.amount,
+                                  createTokenMeta.decimals
+                                )}{" "}
+                                {createTokenMeta.symbol || "tokens"}
                               </td>
                             </tr>
                           ))}
@@ -662,8 +826,8 @@ export default function AdminDashboard() {
                 <div className="mt-4 p-4 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
                   <p className="text-xs text-yellow-800 dark:text-yellow-200">
                     <strong>Note:</strong> Merkle leaves will be stored locally
-                    for proof generation. In production, store these securely on
-                    your backend.
+                    for proof generation. In production, we will store these securely in
+                    our backend.
                   </p>
                 </div>
               )}
@@ -718,7 +882,7 @@ export default function AdminDashboard() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Amount (ETH) *
+                  Amount *
                 </label>
                 <input
                   type="text"
@@ -732,48 +896,42 @@ export default function AdminDashboard() {
 
             {/* Token Information */}
             {fundTokenAddress && fundCampaignId && (
-              <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg">
-                <h3 className="font-semibold mb-3 text-gray-900 dark:text-white">
-                  Token Information
-                </h3>
-                <div className="space-y-2 text-sm">
-                  <p className="text-gray-700 dark:text-gray-300">
-                    <span className="font-medium">Token Address:</span>{" "}
-                    <span className="font-mono text-xs">
-                      {fundTokenAddress}
-                    </span>
-                  </p>
-                  {tokenBalance !== null && (
-                    <p className="text-gray-700 dark:text-gray-300">
-                      <span className="font-medium">Your Balance:</span>{" "}
-                      {formatEther(tokenBalance)} ETH
-                    </p>
-                  )}
-                  {allowance !== null && (
-                    <p className="text-gray-700 dark:text-gray-300">
-                      <span className="font-medium">Current Allowance:</span>{" "}
-                      {formatEther(allowance)} ETH
-                    </p>
-                  )}
-                  {fundAmount && (
-                    <p className="text-gray-700 dark:text-gray-300">
-                      <span className="font-medium">Required Amount:</span>{" "}
-                      {fundAmount} ETH
-                    </p>
-                  )}
+              <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold text-gray-900 dark:text-white">
+                    Token Information
+                  </h3>
+                  <span className="text-xs text-gray-500 dark:text-gray-300">
+                    {fundTokenMeta.name || "Token"} {fundTokenMeta.symbol && `(${fundTokenMeta.symbol})`}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                  {tokenInfoRows.map((row, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-start justify-between rounded-lg bg-white/60 dark:bg-gray-800/60 px-3 py-2 border border-gray-200 dark:border-gray-600"
+                    >
+                      <span className="text-gray-600 dark:text-gray-300">
+                        {row?.label}
+                      </span>
+                      <span className="text-gray-900 dark:text-white text-right ml-3">
+                        {row?.value as React.ReactNode}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
             {/* Approval Status */}
-            {fundTokenAddress && fundAmount && allowance !== null && (
+            {fundTokenAddress && fundAmount && (
               <div
-                className={`p-4 rounded-lg ${allowance >= parseEther(fundAmount)
+                className={`p-4 rounded-lg ${allowance >= requiredAmount
                   ? "bg-green-100 dark:bg-green-900"
                   : "bg-yellow-100 dark:bg-yellow-900"
                   }`}
               >
-                {allowance >= parseEther(fundAmount) ? (
+                {allowance >= requiredAmount ? (
                   <p className="text-green-800 dark:text-green-200">
                     ✓ Sufficient allowance. You can proceed to fund the
                     campaign.
@@ -788,17 +946,18 @@ export default function AdminDashboard() {
             )}
 
             {/* Balance Check */}
-            {tokenBalance !== null &&
-              fundAmount &&
-              tokenBalance < parseEther(fundAmount) && (
-                <div className="p-4 bg-red-100 dark:bg-red-900 rounded-lg">
-                  <p className="text-red-800 dark:text-red-200">
-                    ⚠️ Insufficient balance. You need{" "}
-                    {formatEther(parseEther(fundAmount) - tokenBalance)} more
-                    tokens.
-                  </p>
-                </div>
-              )}
+            {tokenBalance !== null && fundAmount && tokenBalance < requiredAmount && (
+              <div className="p-4 bg-red-100 dark:bg-red-900 rounded-lg">
+                <p className="text-red-800 dark:text-red-200">
+                  ⚠️ Insufficient balance. You need {" "}
+                  {formatUnits(
+                    requiredAmount - tokenBalance,
+                    fundTokenMeta.decimals
+                  )}{" "}
+                  more {fundTokenMeta.symbol || "tokens"}.
+                </p>
+              </div>
+            )}
 
             {/* Approve Button */}
             {fundTokenAddress && fundAmount && (
@@ -806,10 +965,9 @@ export default function AdminDashboard() {
                 onClick={handleApproveToken}
                 disabled={
                   isApproving ||
-
                   !fundTokenAddress ||
                   !fundAmount ||
-                  (allowance !== null && allowance >= parseEther(fundAmount))
+                  allowance >= requiredAmount
                 }
                 className="w-full px-6 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
               >
@@ -817,7 +975,7 @@ export default function AdminDashboard() {
                   ? "Approving..."
                   : isApproveSuccess
                     ? "Approved!"
-                    : allowance !== null && allowance >= parseEther(fundAmount)
+                    : allowance >= requiredAmount
                       ? "Already Approved"
                       : "Approve Tokens"}
               </button>
@@ -839,8 +997,8 @@ export default function AdminDashboard() {
                 !fundCampaignId ||
                 !fundAmount ||
                 !fundTokenAddress ||
-                (allowance !== null && allowance < parseEther(fundAmount)) ||
-                (tokenBalance !== null && tokenBalance < parseEther(fundAmount))
+                allowance < requiredAmount ||
+                tokenBalance < requiredAmount
               }
               className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
             >
@@ -850,9 +1008,9 @@ export default function AdminDashboard() {
                   ? "Campaign Funded!"
                   : !fundTokenAddress
                     ? "Enter Campaign ID First"
-                    : allowance !== null && allowance < parseEther(fundAmount)
+                    : allowance < requiredAmount
                       ? "Approve Tokens First"
-                      : tokenBalance !== null && tokenBalance < parseEther(fundAmount)
+                      : tokenBalance < requiredAmount
                         ? "Insufficient Balance"
                         : "Fund Campaign"}
             </button>

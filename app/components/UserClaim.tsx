@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, ReactNode } from "react";
 import {
   useAccount,
   useWaitForTransactionReceipt,
   useReadContract,
 } from "wagmi";
-import { writeContract } from "@wagmi/core";
-import { parseEther, formatEther, type Address } from "viem";
+import { readContract, writeContract } from "@wagmi/core";
+import { formatUnits, parseAbi } from "viem";
 import { config } from "@/app/config/WagmiConfig";
 import { CONTRACT_ADDRESS } from "@/app/config/contract";
 import CONTRACT_ABI from "@/app/utils/contractABI.json";
@@ -20,6 +20,7 @@ import {
 import {
   getMerkleLeaves,
   findLeafByAccount,
+  getCampaignProperty,
 } from "@/app/utils/merkleStorage";
 
 type Campaign = {
@@ -52,6 +53,18 @@ export default function UserClaim() {
   const [proofError, setProofError] = useState<string>("");
   const [claimHash, setClaimHash] = useState<`0x${string}` | undefined>();
   const [isClaiming, setIsClaiming] = useState(false);
+  const [tokenMeta, setTokenMeta] = useState<{
+    symbol: string;
+    name: string;
+    decimals: number;
+  }>({ symbol: "", name: "", decimals: 18 });
+  const [propertyId, setPropertyId] = useState<number | null>(null);
+
+  const metadataAbi = parseAbi([
+    "function symbol() view returns (string)",
+    "function name() view returns (string)",
+    "function decimals() view returns (uint8)",
+  ]);
 
   const { isLoading: isConfirming, isSuccess: isClaimSuccess } =
     useWaitForTransactionReceipt({
@@ -95,7 +108,53 @@ export default function UserClaim() {
         active: campaignData[6],
       });
     }
+    const localProperty = getCampaignProperty(Number(campaignId));
+    setPropertyId(localProperty);
   }, [campaignData]);
+
+  // Fetch token metadata for display/formatting
+  useEffect(() => {
+    if (!campaignInfo?.token) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const [symbol, name, decimals] = await Promise.all([
+          readContract(config, {
+            address: campaignInfo.token,
+            abi: metadataAbi,
+            functionName: "symbol",
+          }),
+          readContract(config, {
+            address: campaignInfo.token,
+            abi: metadataAbi,
+            functionName: "name",
+          }),
+          readContract(config, {
+            address: campaignInfo.token,
+            abi: metadataAbi,
+            functionName: "decimals",
+          }),
+        ]);
+
+        if (!cancelled) {
+          setTokenMeta({
+            symbol: symbol as string,
+            name: name as string,
+            decimals: Number(decimals),
+          });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setTokenMeta({ symbol: "", name: "", decimals: 18 });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignInfo?.token]);
 
   useEffect(() => {
     if (claimedStatus !== undefined) {
@@ -152,6 +211,80 @@ export default function UserClaim() {
       refetchClaimed();
     }
   }, [userLeaf, campaignId]);
+
+  const campaignInfoRows: { label: string; value: ReactNode }[] = (
+    campaignInfo
+      ? ([
+        propertyId !== null
+          ? {
+            label: "Property ID",
+            value: propertyId.toString(),
+          }
+          : null,
+        {
+          label: "Token",
+          value: (
+            <span className="font-mono text-xs break-all">
+              {campaignInfo.token}
+            </span>
+          ),
+        },
+        {
+          label: "Total Allocation",
+          value: `${formatUnits(
+            campaignInfo.totalAllocation,
+            tokenMeta.decimals
+          )} ${tokenMeta.symbol || "tokens"}`,
+        },
+        {
+          label: "Total Funded",
+          value: `${formatUnits(
+            campaignInfo.totalFunded,
+            tokenMeta.decimals
+          )} ${tokenMeta.symbol || "tokens"}`,
+        },
+        {
+          label: "Total Claimed",
+          value: `${formatUnits(
+            campaignInfo.totalClaimed,
+            tokenMeta.decimals
+          )} ${tokenMeta.symbol || "tokens"}`,
+        },
+        {
+          label: "Active",
+          value: campaignInfo.active ? "Yes" : "No",
+        },
+        {
+          label: "Merkle Root",
+          value: (
+            <span className="font-mono text-[11px] break-all">
+              {campaignInfo.merkleRoot}
+            </span>
+          ),
+        },
+      ] as ({ label: string; value: ReactNode } | null)[])
+      : []
+  ).filter(
+    (row): row is { label: string; value: ReactNode } => row !== null
+  );
+
+  const rewardInfoRows: { label: string; value: ReactNode }[] = userLeaf
+    ? [
+      {
+        label: "Index",
+        value: userLeaf.index,
+      },
+      {
+        label: "Amount",
+        value: `${formatUnits(userLeaf.amount, tokenMeta.decimals)} ${tokenMeta.symbol || "tokens"
+          }`,
+      },
+      {
+        label: "Account",
+        value: <span className="font-mono text-xs break-all">{address}</span>,
+      },
+    ]
+    : [];
 
   const handleCheckCampaign = () => {
     if (!campaignId) {
@@ -244,32 +377,29 @@ export default function UserClaim() {
           </div>
 
           {campaignInfo && (
-            <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg">
-              <h3 className="font-semibold mb-2 text-gray-900 dark:text-white">
-                Campaign Information
-              </h3>
-              <div className="space-y-1 text-sm">
-                <p className="text-gray-700 dark:text-gray-300">
-                  Token: <span className="font-mono">{campaignInfo.token}</span>
-                </p>
-                <p className="text-gray-700 dark:text-gray-300">
-                  Total Allocation: {formatEther(campaignInfo.totalAllocation)} USDT
-                </p>
-                <p className="text-gray-700 dark:text-gray-300">
-                  Total Funded: {formatEther(campaignInfo.totalFunded)} USDT
-                </p>
-                <p className="text-gray-700 dark:text-gray-300">
-                  Total Claimed: {formatEther(campaignInfo.totalClaimed)} USDT
-                </p>
-                <p className="text-gray-700 dark:text-gray-300">
-                  Active: {campaignInfo.active ? "Yes" : "No"}
-                </p>
-                <p className="text-gray-700 dark:text-gray-300">
-                  Merkle Root:{" "}
-                  <span className="font-mono text-xs break-all">
-                    {campaignInfo.merkleRoot}
-                  </span>
-                </p>
+            <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-gray-900 dark:text-white">
+                  Campaign Information
+                </h3>
+                <span className="text-xs text-gray-500 dark:text-gray-300">
+                  {tokenMeta.name || "Token"} {tokenMeta.symbol && `(${tokenMeta.symbol})`}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                {campaignInfoRows.map((row, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-start justify-between rounded-lg bg-white/60 dark:bg-gray-800/60 px-3 py-2 border border-gray-200 dark:border-gray-600"
+                  >
+                    <span className="text-gray-600 dark:text-gray-300">
+                      {row.label}
+                    </span>
+                    <span className="text-gray-900 dark:text-white text-right ml-3">
+                      {row.value}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -280,18 +410,20 @@ export default function UserClaim() {
               <h3 className="font-semibold mb-3 text-gray-900 dark:text-white">
                 Your Reward Information
               </h3>
-              <div className="space-y-2 text-sm">
-                <p className="text-gray-700 dark:text-gray-300">
-                  <span className="font-medium">Index:</span> {userLeaf.index}
-                </p>
-                <p className="text-gray-700 dark:text-gray-300">
-                  <span className="font-medium">Amount:</span>{" "}
-                  {formatEther(userLeaf.amount)} ETH
-                </p>
-                <p className="text-gray-700 dark:text-gray-300">
-                  <span className="font-medium">Account:</span>{" "}
-                  <span className="font-mono text-xs">{address}</span>
-                </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                {rewardInfoRows.map((row, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-start justify-between rounded-lg bg-white/70 dark:bg-green-950/40 px-3 py-2 border border-green-200 dark:border-green-700"
+                  >
+                    <span className="text-gray-700 dark:text-gray-300">
+                      {row.label}
+                    </span>
+                    <span className="text-gray-900 dark:text-white text-right ml-3">
+                      {row.value}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
