@@ -11,7 +11,7 @@ export interface MerkleLeaf {
 /**
  * Hash a leaf node: keccak256(abi.encodePacked(index, account, amount))
  */
-function hashLeaf(leaf: MerkleLeaf): Buffer {
+export function hashLeaf(leaf: MerkleLeaf): Buffer {
   const encoded = encodePacked(
     ["uint256", "address", "uint256"],
     [BigInt(leaf.index), leaf.account, leaf.amount]
