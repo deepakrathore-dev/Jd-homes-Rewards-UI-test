@@ -12,16 +12,7 @@ import { config } from "@/app/config/WagmiConfig";
 import { CONTRACT_ADDRESS } from "@/app/config/contract";
 import CONTRACT_ABI from "@/app/utils/contractABI.json";
 
-import {
-  generateMerkleTree,
-  getMerkleProof,
-  type MerkleLeaf,
-} from "@/app/utils/merkle";
-import {
-  getMerkleLeaves,
-  findLeafByAccount,
-  getCampaignProperty,
-} from "@/app/utils/merkleStorage";
+import type { MerkleLeaf } from "@/app/utils/merkle";
 
 type Campaign = {
   token: `0x${string}`;
@@ -34,14 +25,87 @@ type Campaign = {
 };
 
 type CampaignTuple = [
-  string,   // token
-  string,   // merkleRoot
-  bigint,   // totalAllocation
-  bigint,   // totalFunded
-  bigint,   // totalClaimed
-  bigint,   // expiry
-  boolean   // active
+  string, // token
+  string, // merkleRoot
+  bigint, // totalAllocation
+  bigint, // totalFunded
+  bigint, // totalClaimed
+  bigint, // expiry
+  boolean // active
 ];
+
+const metadataAbi = parseAbi([
+  "function symbol() view returns (string)",
+  "function name() view returns (string)",
+  "function decimals() view returns (uint8)",
+]);
+
+// Campaign Card Component
+function CampaignCard({
+  id,
+  campaign,
+  onCheckEligibility,
+  tokenMeta,
+}: {
+  id: number;
+  campaign: Campaign;
+  onCheckEligibility: (id: number) => void;
+  tokenMeta: { symbol: string; name: string; decimals: number };
+}) {
+  return (
+    <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h4 className="font-semibold text-gray-900 dark:text-white">
+            Campaign #{id}
+          </h4>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {campaign.active ? (
+              <span className="text-green-600 dark:text-green-400">Active</span>
+            ) : (
+              <span className="text-gray-600 dark:text-gray-400">Inactive</span>
+            )}
+          </p>
+        </div>
+        <button
+          onClick={() => onCheckEligibility(id)}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm"
+        >
+          Check Eligibility
+        </button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+        <div>
+          <p className="text-gray-600 dark:text-gray-400">Total Allocation</p>
+          <p className="font-medium text-gray-900 dark:text-white">
+            {formatUnits(campaign.totalAllocation, tokenMeta.decimals || 18)}{" "}
+            {tokenMeta.symbol || "tokens"}
+          </p>
+        </div>
+        <div>
+          <p className="text-gray-600 dark:text-gray-400">Total Funded</p>
+          <p className="font-medium text-gray-900 dark:text-white">
+            {formatUnits(campaign.totalFunded, tokenMeta.decimals || 18)}{" "}
+            {tokenMeta.symbol || "tokens"}
+          </p>
+        </div>
+        <div>
+          <p className="text-gray-600 dark:text-gray-400">Total Claimed</p>
+          <p className="font-medium text-gray-900 dark:text-white">
+            {formatUnits(campaign.totalClaimed, tokenMeta.decimals || 18)}{" "}
+            {tokenMeta.symbol || "tokens"}
+          </p>
+        </div>
+        <div>
+          <p className="text-gray-600 dark:text-gray-400">Token</p>
+          <p className="font-mono text-xs text-gray-900 dark:text-white break-all">
+            {campaign.token.slice(0, 10)}...
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function UserClaim() {
   const { address, isConnected } = useAccount();
@@ -58,13 +122,13 @@ export default function UserClaim() {
     name: string;
     decimals: number;
   }>({ symbol: "", name: "", decimals: 18 });
-  const [propertyId, setPropertyId] = useState<number | null>(null);
 
-  const metadataAbi = parseAbi([
-    "function symbol() view returns (string)",
-    "function name() view returns (string)",
-    "function decimals() view returns (uint8)",
-  ]);
+  // All campaigns
+  const [allCampaigns, setAllCampaigns] = useState<Campaign[]>([]);
+  const [campaignIds, setCampaignIds] = useState<number[]>([]);
+  const [campaignTokenMetas, setCampaignTokenMetas] = useState<
+    Record<number, { symbol: string; name: string; decimals: number }>
+  >({});
 
   const { isLoading: isConfirming, isSuccess: isClaimSuccess } =
     useWaitForTransactionReceipt({
@@ -80,9 +144,14 @@ export default function UserClaim() {
     query: { enabled: !!campaignId },
   });
 
-  const campaignData = data as CampaignTuple;
+  const campaignData = data as CampaignTuple | undefined;
 
-  console.log("Campaign Data:", campaignData);
+  // Read all campaigns
+  const { data: allCampaignsData, refetch: refetchCampaigns } = useReadContract({
+    address: CONTRACT_ADDRESS,
+    abi: CONTRACT_ABI.abi,
+    functionName: "getAllCampaigns",
+  });
 
   // Check if already claimed
   const { data: claimedStatus, refetch: refetchClaimed } = useReadContract({
@@ -96,6 +165,55 @@ export default function UserClaim() {
     query: { enabled: !!campaignId && !!userLeaf },
   });
 
+  // Load all campaigns
+  useEffect(() => {
+    if (allCampaignsData) {
+      const campaigns = allCampaignsData as Campaign[];
+      setAllCampaigns(campaigns);
+      const ids: number[] = [];
+      for (let i = 1; i <= campaigns.length; i++) {
+        ids.push(i);
+      }
+      setCampaignIds(ids);
+
+      // Fetch token metadata for all campaigns
+      campaigns.forEach((campaign, index) => {
+        const id = index + 1;
+        (async () => {
+          try {
+            const [symbol, name, decimals] = await Promise.all([
+              readContract(config, {
+                address: campaign.token,
+                abi: metadataAbi,
+                functionName: "symbol",
+              }),
+              readContract(config, {
+                address: campaign.token,
+                abi: metadataAbi,
+                functionName: "name",
+              }),
+              readContract(config, {
+                address: campaign.token,
+                abi: metadataAbi,
+                functionName: "decimals",
+              }),
+            ]);
+            setCampaignTokenMetas((prev) => ({
+              ...prev,
+              [id]: {
+                symbol: symbol as string,
+                name: name as string,
+                decimals: Number(decimals),
+              },
+            }));
+          } catch (e) {
+            console.error(`Error fetching token metadata for campaign ${id}:`, e);
+          }
+        })();
+      });
+    }
+  }, [allCampaignsData]);
+
   useEffect(() => {
     if (campaignData) {
       setCampaignInfo({
@@ -108,8 +226,6 @@ export default function UserClaim() {
         active: campaignData[6],
       });
     }
-    const localProperty = getCampaignProperty(Number(campaignId));
-    setPropertyId(localProperty);
   }, [campaignData]);
 
   // Fetch token metadata for display/formatting
@@ -162,47 +278,105 @@ export default function UserClaim() {
     }
   }, [claimedStatus]);
 
-  // Auto-find user's leaf and generate proof when campaign ID changes
-  useEffect(() => {
-    console.log("Generating proof for campaign ID:", campaignId);
-    if (!campaignId || !address || !isConnected) {
-      setUserLeaf(null);
-      setMerkleProof([]);
-      setProofError("");
-      return;
-    }
-
-    // Find user's leaf
-    const leaf = findLeafByAccount(Number(campaignId), address);
-    console.log("Found leaf for user:", leaf);
-    if (!leaf) {
-      setUserLeaf(null);
-      setMerkleProof([]);
-      setProofError("No reward found for your address in this campaign");
-      return;
-    }
-
-    setUserLeaf(leaf);
+  // Check eligibility and fetch proof from MongoDB
+  const handleCheckEligibility = async (id: number) => {
+    setCampaignId(id.toString());
+    setUserLeaf(null);
+    setMerkleProof([]);
     setProofError("");
 
-    // Get all leaves and generate proof
-    const allLeaves = getMerkleLeaves(Number(campaignId));
-    if (!allLeaves) {
-      setMerkleProof([]);
-      setProofError("Merkle tree data not found for this campaign");
+    if (!address || !isConnected) {
+      setProofError("Please connect your wallet");
       return;
     }
 
     try {
-      const tree = generateMerkleTree(allLeaves);
-      const proof = getMerkleProof(tree, leaf);
-      setMerkleProof(proof);
-      setProofError("");
+      // Fetch proof from API
+      const response = await fetch(
+        `/api/campaigns/${id}/proof?address=${address}`
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        setProofError(error.error || "Failed to fetch proof");
+        setUserLeaf(null);
+        setMerkleProof([]);
+        return;
+      }
+
+      const data = await response.json();
+      if (data.success && data.data) {
+        const proofData = data.data;
+
+        // Set user leaf from API response
+        setUserLeaf({
+          index: proofData.index,
+          account: proofData.address as `0x${string}`,
+          amount: BigInt(proofData.amount),
+        });
+
+        // Set merkle proof from API
+        setMerkleProof(proofData.proof as `0x${string}`[]);
+        setProofError("");
+
+        // Update claimed status
+        setIsClaimed(proofData.claimed);
+
+        refetchCampaign();
+      } else {
+        setProofError("No reward found for your address in this campaign");
+        setUserLeaf(null);
+        setMerkleProof([]);
+      }
     } catch (error) {
-      console.error("Error generating proof:", error);
-      setProofError("Failed to generate merkle proof");
+      console.error("Error fetching proof:", error);
+      setProofError("Failed to fetch proof from database");
+      setUserLeaf(null);
       setMerkleProof([]);
     }
+  };
+
+  // Auto-fetch proof when campaign ID changes (if address is available)
+  useEffect(() => {
+    if (!campaignId || !address || !isConnected) {
+      return;
+    }
+
+    // Fetch proof from API
+    (async () => {
+      try {
+        const response = await fetch(
+          `/api/campaigns/${campaignId}/proof?address=${address}`
+        );
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && data.data) {
+            const proofData = data.data;
+
+            setUserLeaf({
+              index: proofData.index,
+              account: proofData.address as `0x${string}`,
+              amount: BigInt(proofData.amount),
+            });
+
+            setMerkleProof(proofData.proof as `0x${string}`[]);
+            setProofError("");
+            setIsClaimed(proofData.claimed);
+          } else {
+            setUserLeaf(null);
+            setMerkleProof([]);
+          }
+        } else {
+          setUserLeaf(null);
+          setMerkleProof([]);
+        }
+      } catch (error) {
+        console.error("Error fetching proof:", error);
+        setUserLeaf(null);
+        setMerkleProof([]);
+      }
+    })();
   }, [campaignId, address, isConnected]);
 
   // Refetch claim status when user leaf changes
@@ -210,17 +384,11 @@ export default function UserClaim() {
     if (userLeaf && campaignId) {
       refetchClaimed();
     }
-  }, [userLeaf, campaignId]);
+  }, [userLeaf, campaignId, refetchClaimed]);
 
   const campaignInfoRows: { label: string; value: ReactNode }[] = (
     campaignInfo
-      ? ([
-        propertyId !== null
-          ? {
-            label: "Property ID",
-            value: propertyId.toString(),
-          }
-          : null,
+      ? [
         {
           label: "Token",
           value: (
@@ -262,10 +430,8 @@ export default function UserClaim() {
             </span>
           ),
         },
-      ] as ({ label: string; value: ReactNode } | null)[])
+      ]
       : []
-  ).filter(
-    (row): row is { label: string; value: ReactNode } => row !== null
   );
 
   const rewardInfoRows: { label: string; value: ReactNode }[] = userLeaf
@@ -276,8 +442,7 @@ export default function UserClaim() {
       },
       {
         label: "Amount",
-        value: `${formatUnits(userLeaf.amount, tokenMeta.decimals)} ${tokenMeta.symbol || "tokens"
-          }`,
+        value: `${formatUnits(userLeaf.amount, tokenMeta.decimals)} ${tokenMeta.symbol || "tokens"}`,
       },
       {
         label: "Account",
@@ -285,14 +450,6 @@ export default function UserClaim() {
       },
     ]
     : [];
-
-  const handleCheckCampaign = () => {
-    if (!campaignId) {
-      alert("Please enter campaign ID");
-      return;
-    }
-    refetchCampaign();
-  };
 
   const handleClaim = async () => {
     if (!campaignId || !address || !userLeaf || merkleProof.length === 0) {
@@ -325,6 +482,24 @@ export default function UserClaim() {
         ],
       });
       setClaimHash(hash);
+
+      // Mark as claimed in MongoDB after transaction is submitted
+      // Note: In production, you might want to wait for confirmation
+      try {
+        await fetch(`/api/campaigns/${campaignId}/mark-claimed`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            index: userLeaf.index,
+            txHash: hash,
+          }),
+        });
+      } catch (dbError) {
+        console.error("Error marking reward as claimed in DB:", dbError);
+        // Don't fail the claim if DB update fails
+      }
     } catch (error) {
       console.error("Error claiming reward:", error);
       alert("Failed to claim reward. Please try again.");
@@ -344,103 +519,122 @@ export default function UserClaim() {
   }
 
   return (
-    <div className="w-full max-w-4xl mx-auto">
+    <div className="w-full max-w-6xl mx-auto space-y-6">
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
         <h2 className="text-2xl font-bold mb-6 text-gray-900 dark:text-white">
           Claim Rewards
         </h2>
 
-        <div className="space-y-6">
-          {/* Campaign Info Section */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Campaign ID *
-              </label>
-              <input
-                type="number"
-                value={campaignId}
-                onChange={(e) => setCampaignId(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                placeholder="1"
-              />
-            </div>
-
-            <div className="flex items-end">
-              <button
-                onClick={handleCheckCampaign}
-                className="w-full px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition"
-              >
-                Check Campaign Info
-              </button>
-            </div>
+        {/* All Campaigns Section */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+              Available Campaigns ({allCampaigns.length})
+            </h3>
+            <button
+              onClick={() => refetchCampaigns()}
+              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition text-sm"
+            >
+              Refresh
+            </button>
           </div>
 
-          {campaignInfo && (
-            <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-gray-900 dark:text-white">
-                  Campaign Information
-                </h3>
-                <span className="text-xs text-gray-500 dark:text-gray-300">
-                  {tokenMeta.name || "Token"} {tokenMeta.symbol && `(${tokenMeta.symbol})`}
-                </span>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                {campaignInfoRows.map((row, idx) => (
-                  <div
-                    key={idx}
-                    className="flex items-start justify-between rounded-lg bg-white/60 dark:bg-gray-800/60 px-3 py-2 border border-gray-200 dark:border-gray-600"
-                  >
-                    <span className="text-gray-600 dark:text-gray-300">
-                      {row.label}
-                    </span>
-                    <span className="text-gray-900 dark:text-white text-right ml-3">
-                      {row.value}
-                    </span>
-                  </div>
-                ))}
-              </div>
+          {allCampaigns.length === 0 ? (
+            <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+              No campaigns found
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {campaignIds.map((id) => {
+                const campaign = allCampaigns[id - 1];
+                if (!campaign) return null;
+                const meta = campaignTokenMetas[id] || {
+                  symbol: "",
+                  name: "",
+                  decimals: 18,
+                };
+
+                return (
+                  <CampaignCard
+                    key={id}
+                    id={id}
+                    campaign={campaign}
+                    onCheckEligibility={handleCheckEligibility}
+                    tokenMeta={meta}
+                  />
+                );
+              })}
             </div>
           )}
+        </div>
 
-          {/* User Reward Info */}
-          {userLeaf && (
-            <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
-              <h3 className="font-semibold mb-3 text-gray-900 dark:text-white">
-                Your Reward Information
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                {rewardInfoRows.map((row, idx) => (
-                  <div
-                    key={idx}
-                    className="flex items-start justify-between rounded-lg bg-white/70 dark:bg-green-950/40 px-3 py-2 border border-green-200 dark:border-green-700"
-                  >
-                    <span className="text-gray-700 dark:text-gray-300">
-                      {row.label}
-                    </span>
-                    <span className="text-gray-900 dark:text-white text-right ml-3">
-                      {row.value}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {proofError && (
-            <div className="p-4 bg-red-100 dark:bg-red-900 rounded-lg">
-              <p className="text-red-800 dark:text-red-200 text-sm">
-                ⚠️ {proofError}
-              </p>
-            </div>
-          )}
-
-          {/* Claim Form */}
-          <div className="border-t border-gray-200 dark:border-gray-700 pt-6">
-            <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">
-              Claim Your Reward
+        {/* Claim Section */}
+        {campaignId && (
+          <div className="border-t border-gray-200 dark:border-gray-700 pt-6 space-y-6">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+              Claim Your Reward - Campaign #{campaignId}
             </h3>
+
+            {campaignInfo && (
+              <div className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="font-semibold text-gray-900 dark:text-white">
+                    Campaign Information
+                  </h4>
+                  <span className="text-xs text-gray-500 dark:text-gray-300">
+                    {tokenMeta.name || "Token"}{" "}
+                    {tokenMeta.symbol && `(${tokenMeta.symbol})`}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                  {campaignInfoRows.map((row, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-start justify-between rounded-lg bg-white/60 dark:bg-gray-800/60 px-3 py-2 border border-gray-200 dark:border-gray-600"
+                    >
+                      <span className="text-gray-600 dark:text-gray-300">
+                        {row.label}
+                      </span>
+                      <span className="text-gray-900 dark:text-white text-right ml-3">
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* User Reward Info */}
+            {userLeaf && (
+              <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+                <h4 className="font-semibold mb-3 text-gray-900 dark:text-white">
+                  Your Reward Information
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                  {rewardInfoRows.map((row, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-start justify-between rounded-lg bg-white/70 dark:bg-green-950/40 px-3 py-2 border border-green-200 dark:border-green-700"
+                    >
+                      <span className="text-gray-700 dark:text-gray-300">
+                        {row.label}
+                      </span>
+                      <span className="text-gray-900 dark:text-white text-right ml-3">
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {proofError && (
+              <div className="p-4 bg-red-100 dark:bg-red-900 rounded-lg">
+                <p className="text-red-800 dark:text-red-200 text-sm">
+                  ⚠️ {proofError}
+                </p>
+              </div>
+            )}
 
             {merkleProof.length > 0 && (
               <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg mb-4">
@@ -497,7 +691,7 @@ export default function UserClaim() {
                 : isClaimSuccess
                   ? "Claimed Successfully!"
                   : !userLeaf
-                    ? "Enter Campaign ID to Find Your Reward"
+                    ? "Check Eligibility First"
                     : merkleProof.length === 0
                       ? "Generating Proof..."
                       : "Claim Reward"}
@@ -511,16 +705,7 @@ export default function UserClaim() {
               </div>
             )}
           </div>
-
-          {/* Info Box */}
-          <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-            <p className="text-sm text-blue-800 dark:text-blue-200">
-              <strong>How it works:</strong> Enter the campaign ID and the system
-              will automatically find your reward, generate the merkle proof, and
-              allow you to claim. No manual input required!
-            </p>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
